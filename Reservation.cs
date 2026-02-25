@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
 using Microsoft.Data.SqlClient;
+using System.ClientModel.Primitives;
 
 namespace DateRangePickerService;
 
@@ -20,7 +21,7 @@ public class Reservation
     }
 
     [Function("Reservation")]
-    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "get", "post")] HttpRequest req)
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Function, "get", "post", Route = "Reservation/{user?}")] HttpRequest req, string user)
     {
         _logger.LogInformation("Processing reservation request and querying database.");
 
@@ -110,14 +111,16 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
         // GET - fetch existing reservations
         var results = new List<Dictionary<string, object?>>();
-
         try
         {
             await using var connection = new SqlConnection(conn);
             await connection.OpenAsync();
 
             await using var cmd = connection.CreateCommand();
-            cmd.CommandText = "SELECT * FROM Reservation";
+            if(user == "admin")
+                cmd.CommandText = "SELECT * FROM Reservation";
+            else
+                cmd.CommandText = "SELECT [From], [To] FROM Reservation";
 
             await using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
