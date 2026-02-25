@@ -116,11 +116,18 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
             await using var connection = new SqlConnection(conn);
             await connection.OpenAsync();
 
+            // compute filter window: start tomorrow (so To > today) and end one year from today
+            var today = DateTime.UtcNow.Date;
+            var oneYearFromToday = today.AddYears(1);
+
             await using var cmd = connection.CreateCommand();
             if(user == "admin")
                 cmd.CommandText = "SELECT * FROM Reservation";
             else
-                cmd.CommandText = "SELECT [From], [To] FROM Reservation";
+                cmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE [To] > @today AND [From] < @oneYear ORDER BY [From] ASC";
+
+            cmd.Parameters.AddWithValue("@today", today);
+            cmd.Parameters.AddWithValue("@oneYear", oneYearFromToday);
 
             await using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
