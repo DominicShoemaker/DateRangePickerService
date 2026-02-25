@@ -137,6 +137,7 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
         catch (Exception ex)
         {
             _logger.LogError(ex, "Error querying Reservation table");
+            _logger.LogError("Connection string used: {Conn}\nexception: {Exception}", conn, ex.ToString());
             return new ObjectResult("Error querying database") { StatusCode = 500 };
         }
 
