@@ -151,5 +151,129 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
         return new OkObjectResult(results);
     }
 
-    
+    [Function("Payment")]
+    public async Task<IActionResult> Payment([HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "Payment")] HttpRequest req)
+    {
+        _logger.LogInformation("Processing payment request.");
+
+        var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
+        if (string.IsNullOrWhiteSpace(conn))
+        {
+            _logger.LogError("SqlConnectionString not set in environment.");
+            return new ObjectResult("Database connection not configured.") { StatusCode = 500 };
+        }
+
+        try
+        {
+            using var reader = new System.IO.StreamReader(req.Body);
+            var body = await reader.ReadToEndAsync();
+            if (string.IsNullOrWhiteSpace(body))
+            {
+                return new BadRequestObjectResult("Request body is empty.");
+            }
+
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+
+            if (!root.TryGetProperty("reservationID", out var resIdEl) && !root.TryGetProperty("ReservationID", out resIdEl))
+            {
+                return new BadRequestObjectResult("reservationID is required.");
+            }
+            
+            int reservationId;
+            if (resIdEl.ValueKind == JsonValueKind.Number)
+            {
+                reservationId = resIdEl.GetInt32();
+            }
+            else if (!int.TryParse(resIdEl.GetString(), out reservationId))
+            {
+                return new BadRequestObjectResult("reservationID must be a valid integer.");
+            }
+
+            if (!root.TryGetProperty("amount", out var amountEl) && !root.TryGetProperty("Amount", out amountEl))
+            {
+                return new BadRequestObjectResult("amount is required.");
+            }
+            
+            decimal amount;
+            if (amountEl.ValueKind == JsonValueKind.Number)
+            {
+                amount = amountEl.GetDecimal();
+            }
+            else if (!decimal.TryParse(amountEl.GetString(), out amount))
+            {
+                return new BadRequestObjectResult("amount must be a valid number.");
+            }
+
+            var stripeKey = Environment.GetEnvironmentVariable("StripeSecretKey");
+            if (string.IsNullOrWhiteSpace(stripeKey))
+            {
+                _logger.LogError("StripeSecretKey not set in environment.");
+                return new ObjectResult("Payment service not configured.") { StatusCode = 500 };
+            }
+
+            Stripe.StripeConfiguration.ApiKey = stripeKey;
+
+            var domain = Environment.GetEnvironmentVariable("DomainUrl") ?? $"{req.Scheme}://{req.Host}";
+
+            var options = new Stripe.Checkout.SessionCreateOptions
+            {
+                PaymentMethodTypes = new List<string> { "card" },
+                LineItems = new List<Stripe.Checkout.SessionLineItemOptions>
+                {
+                    new Stripe.Checkout.SessionLineItemOptions
+                    {
+                        PriceData = new Stripe.Checkout.SessionLineItemPriceDataOptions
+                        {
+                            UnitAmountDecimal = amount * 100, // Stripe expects amount in cents
+                            Currency = "usd", 
+                            ProductData = new Stripe.Checkout.SessionLineItemPriceDataProductDataOptions
+                            {
+                                Name = $"Reservation #{reservationId}",
+                            },
+                        },
+                        Quantity = 1,
+                    },
+                },
+                Mode = "payment",
+                SuccessUrl = $"{domain}?session_id={{CHECKOUT_SESSION_ID}}",
+                CancelUrl = $"{domain}",
+            };
+
+            var service = new Stripe.Checkout.SessionService();
+            Stripe.Checkout.Session session = await service.CreateAsync(options);
+
+            await using var connection = new SqlConnection(conn);
+            await connection.OpenAsync();
+
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = "UPDATE Reservation SET Session = @sessionId WHERE ReservationID = @reservationId";
+            cmd.Parameters.AddWithValue("@sessionId", session.Id);
+            cmd.Parameters.AddWithValue("@reservationId", reservationId);
+
+            int rowsUpdated = await cmd.ExecuteNonQueryAsync();
+            if (rowsUpdated == 0)
+            {
+                _logger.LogWarning("ReservationID {ReservationId} not found in database.", reservationId);
+                return new NotFoundObjectResult($"Reservation {reservationId} not found.");
+            }
+
+            return new OkObjectResult(new { url = session.Url });
+        }
+        catch (JsonException jex)
+        {
+            _logger.LogError(jex, "Invalid JSON in payment request body.");
+            return new BadRequestObjectResult("Invalid JSON payload.");
+        }
+        catch (Stripe.StripeException stripeEx)
+        {
+            _logger.LogError(stripeEx, "Stripe API error.");
+            return new ObjectResult("Payment service error.") { StatusCode = 500 };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing payment");
+            return new ObjectResult("Error processing payment") { StatusCode = 500 };
+        }
+    }
 }
