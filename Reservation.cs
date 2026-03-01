@@ -258,7 +258,7 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                     },
                 },
                 Mode = "payment",
-                SuccessUrl = $"{confirmationUrl}?status=success&reservationId={reservationId}&amount={amount}&from={fromDate:yyyy-MM-dd}&to={toDate:yyyy-MM-dd}",
+                SuccessUrl = $"{confirmationUrl}?status=success&reservationid={reservationId}&amount={amount}&from={fromDate:yyyy-MM-dd}&to={toDate:yyyy-MM-dd}",
                 CancelUrl = $"{confirmationUrl}",
             };
 
