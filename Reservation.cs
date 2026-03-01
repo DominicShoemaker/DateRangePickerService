@@ -214,7 +214,29 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
             Stripe.StripeConfiguration.ApiKey = stripeKey;
 
-            var domain = Environment.GetEnvironmentVariable("DomainUrl") ?? $"{req.Scheme}://{req.Host}";
+            var confirmationUrl = Environment.GetEnvironmentVariable("ConfirmationUrl") ?? $"{req.Scheme}://{req.Host}";
+
+            DateTime fromDate;
+            DateTime toDate;
+
+            await using var connection = new SqlConnection(conn);
+            await connection.OpenAsync();
+
+            await using var selectCmd = connection.CreateCommand();
+            selectCmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE ReservationID = @reservationId";
+            selectCmd.Parameters.AddWithValue("@reservationId", reservationId);
+            await using (var dbReader = await selectCmd.ExecuteReaderAsync())
+            {
+                if (await dbReader.ReadAsync())
+                {
+                    fromDate = dbReader.GetDateTime(0);
+                    toDate = dbReader.GetDateTime(1);
+                }
+                else
+                {
+                    return new NotFoundObjectResult($"Reservation {reservationId} not found.");
+                }
+            }
 
             var options = new Stripe.Checkout.SessionCreateOptions
             {
@@ -236,26 +258,23 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                     },
                 },
                 Mode = "payment",
-                SuccessUrl = $"{domain}?session_id={{CHECKOUT_SESSION_ID}}",
-                CancelUrl = $"{domain}",
+                SuccessUrl = $"{confirmationUrl}?status=success&reservationId={reservationId}&amount={amount}&from={fromDate:yyyy-MM-dd}&to={toDate:yyyy-MM-dd}",
+                CancelUrl = $"{confirmationUrl}",
             };
 
             var service = new Stripe.Checkout.SessionService();
             Stripe.Checkout.Session session = await service.CreateAsync(options);
 
-            await using var connection = new SqlConnection(conn);
-            await connection.OpenAsync();
+            await using var updateCmd = connection.CreateCommand();
+            updateCmd.CommandText = "UPDATE Reservation SET Session = @sessionId WHERE ReservationID = @reservationId";
+            updateCmd.Parameters.AddWithValue("@sessionId", session.Id);
+            updateCmd.Parameters.AddWithValue("@reservationId", reservationId);
 
-            await using var cmd = connection.CreateCommand();
-            cmd.CommandText = "UPDATE Reservation SET Session = @sessionId WHERE ReservationID = @reservationId";
-            cmd.Parameters.AddWithValue("@sessionId", session.Id);
-            cmd.Parameters.AddWithValue("@reservationId", reservationId);
-
-            int rowsUpdated = await cmd.ExecuteNonQueryAsync();
+            int rowsUpdated = await updateCmd.ExecuteNonQueryAsync();
             if (rowsUpdated == 0)
             {
                 _logger.LogWarning("ReservationID {ReservationId} not found in database.", reservationId);
-                return new NotFoundObjectResult($"Reservation {reservationId} not found.");
+                return new NotFoundObjectResult($"Reservation {reservationId} not found during update.");
             }
 
             return new OkObjectResult(new { url = session.Url });
@@ -307,17 +326,17 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                 {
                     _logger.LogInformation("Checkout session {SessionId} completed successfully.", session.Id);
 
-                    // TODO: Update your database according to your schema (e.g. mark reservation as paid)
-                    // var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
-                    // if (!string.IsNullOrWhiteSpace(conn))
-                    // {
-                    //     await using var connection = new SqlConnection(conn);
-                    //     await connection.OpenAsync();
-                    //     await using var cmd = connection.CreateCommand();
-                    //     cmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
-                    //     cmd.Parameters.AddWithValue("@sessionId", session.Id);
-                    //     await cmd.ExecuteNonQueryAsync();
-                    // }
+                    // Update database - mark reservation as paid
+                    var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
+                    if (!string.IsNullOrWhiteSpace(conn))
+                    {
+                        await using var connection = new SqlConnection(conn);
+                        await connection.OpenAsync();
+                        await using var cmd = connection.CreateCommand();
+                        cmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
+                        cmd.Parameters.AddWithValue("@sessionId", session.Id);
+                        await cmd.ExecuteNonQueryAsync();
+                    }
                 }
             }
             else
