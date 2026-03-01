@@ -276,4 +276,66 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
             return new ObjectResult("Error processing payment") { StatusCode = 500 };
         }
     }
+
+    [Function("StripeWebhook")]
+    public async Task<IActionResult> StripeWebhook([HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "Webhook")] HttpRequest req)
+    {
+        _logger.LogInformation("Processing Stripe webhook.");
+
+        var json = await new System.IO.StreamReader(req.Body).ReadToEndAsync();
+        string signatureHeader = req.Headers["Stripe-Signature"].ToString();
+        var endpointSecret = Environment.GetEnvironmentVariable("StripeWebhookSecret");
+
+        if (string.IsNullOrEmpty(endpointSecret))
+        {
+            _logger.LogError("StripeWebhookSecret not set in environment.");
+            return new ObjectResult("Webhook secret not configured.") { StatusCode = 500 };
+        }
+
+        try
+        {
+            var stripeEvent = Stripe.EventUtility.ConstructEvent(
+                json,
+                signatureHeader,
+                endpointSecret
+            );
+
+            if (stripeEvent.Type == "checkout.session.completed")
+            {
+                var session = stripeEvent.Data.Object as Stripe.Checkout.Session;
+                if (session != null)
+                {
+                    _logger.LogInformation("Checkout session {SessionId} completed successfully.", session.Id);
+
+                    // TODO: Update your database according to your schema (e.g. mark reservation as paid)
+                    // var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
+                    // if (!string.IsNullOrWhiteSpace(conn))
+                    // {
+                    //     await using var connection = new SqlConnection(conn);
+                    //     await connection.OpenAsync();
+                    //     await using var cmd = connection.CreateCommand();
+                    //     cmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
+                    //     cmd.Parameters.AddWithValue("@sessionId", session.Id);
+                    //     await cmd.ExecuteNonQueryAsync();
+                    // }
+                }
+            }
+            else
+            {
+                _logger.LogInformation("Unhandled event type: {EventType}", stripeEvent.Type);
+            }
+
+            return new OkResult();
+        }
+        catch (Stripe.StripeException e)
+        {
+            _logger.LogError(e, "Invalid Stripe signature.");
+            return new BadRequestObjectResult("Invalid payload or signature.");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error processing webhook");
+            return new ObjectResult("Error processing webhook") { StatusCode = 500 };
+        }
+    }
 }
