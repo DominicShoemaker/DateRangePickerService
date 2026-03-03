@@ -238,6 +238,14 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                 }
             }
 
+            // Compare amount with the price rules
+            var calc = GetCalculator();
+            var price = calc.GetTotalAndDiscountedPrice(fromDate.ToString("yyyy-MM-dd"), toDate.ToString("yyyy-MM-dd"));
+            if (amount > price.DiscountedPrice * (decimal)0.9)
+            {
+                return new BadRequestObjectResult("amount does not match the price rules.");
+            }
+
             var options = new Stripe.Checkout.SessionCreateOptions
             {
                 PaymentMethodTypes = new List<string> { "card" },
@@ -356,5 +364,12 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
             _logger.LogError(ex, "Error processing webhook");
             return new ObjectResult("Error processing webhook") { StatusCode = 500 };
         }
+    }
+
+    private PriceCalculator GetCalculator()
+    {
+        string rulesPath = Path.Combine(AppContext.BaseDirectory, "price_rules.json");
+        var rules = PriceRules.CreateFromJson(rulesPath);
+        return new PriceCalculator(rules);
     }
 }

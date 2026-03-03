@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace CasaDePedra.Pricing
+namespace DateRangePickerService
 {
     // C# representations of the JSON structure in price_rules.json
     public class PriceRules
