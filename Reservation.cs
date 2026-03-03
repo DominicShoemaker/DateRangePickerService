@@ -59,6 +59,12 @@ public class Reservation
                 }
                 string email = emailEl.GetString()!;
 
+                string? fullName = null;
+                if (root.TryGetProperty("fullName", out var fullNameEl) && fullNameEl.ValueKind != JsonValueKind.Null)
+                {
+                    fullName = fullNameEl.GetString();
+                }
+
                 string? phone = null;
                 if (root.TryGetProperty("Phone", out var phoneEl) && phoneEl.ValueKind != JsonValueKind.Null)
                 {
@@ -79,12 +85,13 @@ public class Reservation
                 await connection.OpenAsync();
 
                 await using var cmd = connection.CreateCommand();
-                cmd.CommandText = @$"INSERT INTO Reservation ({(source == null?"":"Source,")} Email, {(phone == null?"":"Phone,")} [From], [To])
-VALUES ({(source == null?"":"@source,")} @email, {(phone == null?"":"@phone,")} @from, @to);
+                cmd.CommandText = @$"INSERT INTO Reservation ({(source == null?"":"Source,")} {(fullName == null?"":"FullName,")} Email, {(phone == null?"":"Phone,")} [From], [To])
+VALUES ({(source == null?"":"@source,")} {(fullName == null?"":"@fullName,")} @email, {(phone == null?"":"@phone,")} @from, @to);
 SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
                 if(source != null) cmd.Parameters.AddWithValue("@source", source);
                 cmd.Parameters.AddWithValue("@email", email);
+                if(fullName != null) cmd.Parameters.AddWithValue("@fullName", fullName);
                 if(phone != null) cmd.Parameters.AddWithValue("@phone", phone);
                 cmd.Parameters.AddWithValue("@from", fromDate.Date);
                 cmd.Parameters.AddWithValue("@to", toDate.Date);
