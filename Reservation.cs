@@ -241,8 +241,9 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
             // Compare amount with the price rules
             var calc = GetCalculator();
             var price = calc.GetTotalAndDiscountedPrice(fromDate.ToString("yyyy-MM-dd"), toDate.ToString("yyyy-MM-dd"));
-            if (amount > price.DiscountedPrice * (decimal)0.9)
+            if (amount != price.DiscountedPrice)
             {
+                _logger.LogError("Amount {amount} does not match the price rules {price}", amount, price.DiscountedPrice);
                 return new BadRequestObjectResult("amount does not match the price rules.");
             }
 
