@@ -342,16 +342,67 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                 {
                     _logger.LogInformation("Checkout session {SessionId} completed successfully.", session.Id);
 
-                    // Update database - mark reservation as paid
+                    // Update database - mark reservation as paid and fetch details for email
                     var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
                     if (!string.IsNullOrWhiteSpace(conn))
                     {
                         await using var connection = new SqlConnection(conn);
                         await connection.OpenAsync();
                         await using var cmd = connection.CreateCommand();
-                        cmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
+                        cmd.CommandText = @"UPDATE Reservation SET Status = 'Paid' 
+                                            OUTPUT inserted.ReservationID, inserted.FullName, inserted.Email, inserted.[From], inserted.[To] 
+                                            WHERE Session = @sessionId";
                         cmd.Parameters.AddWithValue("@sessionId", session.Id);
-                        await cmd.ExecuteNonQueryAsync();
+                        
+                        await using var reader = await cmd.ExecuteReaderAsync();
+                        if (await reader.ReadAsync())
+                        {
+                            int reservationId = reader.GetInt32(0);
+                            string fullName = reader.IsDBNull(1) ? "Guest" : reader.GetString(1);
+                            string email = reader.GetString(2);
+                            DateTime fromDate = reader.GetDateTime(3);
+                            DateTime toDate = reader.GetDateTime(4);
+                            
+                            int nights = (int)(toDate - fromDate).TotalDays;
+                            decimal amountPaid = (session.AmountTotal ?? 0) / 100m;
+                            
+                            // Send Email via Azure Communication Services
+                            var connectionString = Environment.GetEnvironmentVariable("COMMUNICATION_SERVICES_CONNECTION_STRING");
+
+                            if (!string.IsNullOrEmpty(connectionString))
+                            {
+                                try
+                                {
+                                    var emailClient = new Azure.Communication.Email.EmailClient(connectionString);
+
+                                    var subject = $"Booking Confirmation - Reservation #{reservationId}";
+                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd}\nCheck-out: {toDate:yyyy-MM-dd}\nTotal Nights: {nights}\nAmount Paid: {amountPaid:C}\n\nWe look forward to hosting you!\n\nCasa De Pedra";
+                                    var sender = "donotreply@casadepedra.rio";
+                                    
+                                    var emailMessage = new Azure.Communication.Email.EmailMessage(
+                                        senderAddress: sender,
+                                        recipientAddress: email,
+                                        content: new Azure.Communication.Email.EmailContent(subject)
+                                        {
+                                            PlainText = plainTextContent
+                                        });
+
+                                    Azure.Communication.Email.EmailSendOperation emailSendOperation = await emailClient.SendAsync(
+                                        Azure.WaitUntil.Started,
+                                        emailMessage);
+
+                                    _logger.LogInformation("Confirmation email queued to {Email}. Operation Id: {OperationId}", email, emailSendOperation.Id);
+                                }
+                                catch (Exception emailEx)
+                                {
+                                    _logger.LogError(emailEx, "Failed to send confirmation email.");
+                                }
+                            }
+                            else
+                            {
+                                _logger.LogWarning("COMMUNICATION_SERVICES_CONNECTION_STRING is missing. Cannot send confirmation email.");
+                            }
+                        }
                     }
                 }
             }
