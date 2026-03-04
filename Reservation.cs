@@ -86,8 +86,8 @@ public class Reservation
 
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText = @$"INSERT INTO Reservation ({(source == null?"":"Source,")} {(fullName == null?"":"FullName,")} Email, {(phone == null?"":"Phone,")} [From], [To])
-VALUES ({(source == null?"":"@source,")} {(fullName == null?"":"@fullName,")} @email, {(phone == null?"":"@phone,")} @from, @to);
-SELECT CAST(SCOPE_IDENTITY() AS INT);";
+                    VALUES ({(source == null?"":"@source,")} {(fullName == null?"":"@fullName,")} @email, {(phone == null?"":"@phone,")} @from, @to);
+                    SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
                 if(source != null) cmd.Parameters.AddWithValue("@source", source);
                 cmd.Parameters.AddWithValue("@email", email);
