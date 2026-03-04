@@ -348,20 +348,41 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                     {
                         await using var connection = new SqlConnection(conn);
                         await connection.OpenAsync();
-                        await using var cmd = connection.CreateCommand();
-                        cmd.CommandText = @"UPDATE Reservation SET Status = 'Paid' 
-                                            OUTPUT inserted.ReservationID, inserted.FullName, inserted.Email, inserted.[From], inserted.[To] 
-                                            WHERE Session = @sessionId";
-                        cmd.Parameters.AddWithValue("@sessionId", session.Id);
-                        
-                        await using var reader = await cmd.ExecuteReaderAsync();
-                        if (await reader.ReadAsync())
+
+                        // 1. Fetch Reservation details first
+                        await using var selectCmd = connection.CreateCommand();
+                        selectCmd.CommandText = @"SELECT ReservationID, FullName, Email, [From], [To] 
+                                                  FROM Reservation 
+                                                  WHERE Session = @sessionId";
+                        selectCmd.Parameters.AddWithValue("@sessionId", session.Id);
+
+                        int reservationId = 0;
+                        string fullName = "Guest";
+                        string email = "";
+                        DateTime fromDate = default;
+                        DateTime toDate = default;
+                        bool found = false;
+
+                        await using (var reader = await selectCmd.ExecuteReaderAsync())
                         {
-                            int reservationId = reader.GetInt32(0);
-                            string fullName = reader.IsDBNull(1) ? "Guest" : reader.GetString(1);
-                            string email = reader.GetString(2);
-                            DateTime fromDate = reader.GetDateTime(3);
-                            DateTime toDate = reader.GetDateTime(4);
+                            if (await reader.ReadAsync())
+                            {
+                                reservationId = reader.GetInt32(0);
+                                fullName = reader.IsDBNull(1) ? "Guest" : reader.GetString(1);
+                                email = reader.GetString(2);
+                                fromDate = reader.GetDateTime(3);
+                                toDate = reader.GetDateTime(4);
+                                found = true;
+                            }
+                        }
+
+                        if (found)
+                        {
+                            // 2. Update status to 'Paid'
+                            await using var updateCmd = connection.CreateCommand();
+                            updateCmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
+                            updateCmd.Parameters.AddWithValue("@sessionId", session.Id);
+                            await updateCmd.ExecuteNonQueryAsync();
                             
                             int nights = (int)(toDate - fromDate).TotalDays;
                             decimal amountPaid = (session.AmountTotal ?? 0) / 100m;
