@@ -397,7 +397,7 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                                     var emailClient = new Azure.Communication.Email.EmailClient(connectionString);
 
                                     var subject = $"Booking Confirmation - Reservation #{reservationId}";
-                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd}\nCheck-out: {toDate:yyyy-MM-dd}\nTotal Nights: {nights}\nAmount Paid: {amountPaid:C}\n\nWe look forward to hosting you!\n\nCasa De Pedra";
+                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd} after 3PM\nCheck-out: {toDate:yyyy-MM-dd} before 11AM\nTotal Nights: {nights}\nAmount Paid: {amountPaid:C}\n\nWe look forward to hosting you!\n\nCasaDePedra.rio";
                                     var sender = "DoNotReply@casadepedra.rio";
                                     
                                     var emailMessage = new Azure.Communication.Email.EmailMessage(
@@ -405,18 +405,7 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                                         recipientAddress: email,
                                         content: new Azure.Communication.Email.EmailContent(subject)
                                         {
-                                            PlainText = plainTextContent,
-                                            Html = $@"
-                                            <html>
-                                                <body>
-                                                    <h1>
-                                                        Hello world via email.
-                                                    </h1>
-                                                    <p>
-                                                        {plainTextContent}
-                                                    </p>
-                                                </body>
-                                            </html>"
+                                            PlainText = plainTextContent
                                         });
 
                                     Azure.Communication.Email.EmailSendOperation emailSendOperation = await emailClient.SendAsync(
