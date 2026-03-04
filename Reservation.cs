@@ -397,7 +397,8 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                                     var emailClient = new Azure.Communication.Email.EmailClient(connectionString);
 
                                     var subject = $"Booking Confirmation - Reservation #{reservationId}";
-                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd} after 3PM\nCheck-out: {toDate:yyyy-MM-dd} before 11AM\nTotal Nights: {nights}\nAmount Paid: {amountPaid:C}\n\nWe look forward to hosting you!\n\nCasaDePedra.rio";
+                                    var formattedAmount = amountPaid.ToString("C", System.Globalization.CultureInfo.CreateSpecificCulture("en-US"));
+                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd} after 3PM\nCheck-out: {toDate:yyyy-MM-dd} before 11AM\nTotal Nights: {nights}\nAmount Paid: {formattedAmount}\n\nWe look forward to hosting you!\n\nCasaDePedra.rio";
                                     var sender = "DoNotReply@casadepedra.rio";
                                     
                                     var emailMessage = new Azure.Communication.Email.EmailMessage(
@@ -409,7 +410,7 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
                                         });
 
                                     Azure.Communication.Email.EmailSendOperation emailSendOperation = await emailClient.SendAsync(
-                                        Azure.WaitUntil.Completed,
+                                        Azure.WaitUntil.Started,
                                         emailMessage);
 
                                     _logger.LogInformation("Confirmation email is sent to {Email}. Operation Id: {OperationId}", email, emailSendOperation.Id);
