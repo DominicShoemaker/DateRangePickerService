@@ -377,21 +377,32 @@ SELECT CAST(SCOPE_IDENTITY() AS INT);";
 
                                     var subject = $"Booking Confirmation - Reservation #{reservationId}";
                                     var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd}\nCheck-out: {toDate:yyyy-MM-dd}\nTotal Nights: {nights}\nAmount Paid: {amountPaid:C}\n\nWe look forward to hosting you!\n\nCasa De Pedra";
-                                    var sender = "donotreply@casadepedra.rio";
+                                    var sender = "DoNotReply@casadepedra.rio";
                                     
                                     var emailMessage = new Azure.Communication.Email.EmailMessage(
                                         senderAddress: sender,
                                         recipientAddress: email,
                                         content: new Azure.Communication.Email.EmailContent(subject)
                                         {
-                                            PlainText = plainTextContent
+                                            PlainText = plainTextContent,
+                                            Html = $@"
+                                            <html>
+                                                <body>
+                                                    <h1>
+                                                        Hello world via email.
+                                                    </h1>
+                                                    <p>
+                                                        {plainTextContent}
+                                                    </p>
+                                                </body>
+                                            </html>"
                                         });
 
                                     Azure.Communication.Email.EmailSendOperation emailSendOperation = await emailClient.SendAsync(
-                                        Azure.WaitUntil.Started,
+                                        Azure.WaitUntil.Completed,
                                         emailMessage);
 
-                                    _logger.LogInformation("Confirmation email queued to {Email}. Operation Id: {OperationId}", email, emailSendOperation.Id);
+                                    _logger.LogInformation("Confirmation email is sent to {Email}. Operation Id: {OperationId}", email, emailSendOperation.Id);
                                 }
                                 catch (Exception emailEx)
                                 {
