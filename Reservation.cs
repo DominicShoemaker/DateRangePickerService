@@ -21,7 +21,7 @@ public class Reservation
     }
 
     [Function("Reservation")]
-    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = "Reservation/{user?}")] HttpRequest req, string user)
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid, string from, string to)
     {
         _logger.LogInformation("Processing reservation request and querying database.");
 
@@ -116,6 +116,76 @@ public class Reservation
             }
         }
 
+        // DELETE - remove a reservation
+        if (string.Equals(req.Method, "DELETE", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                using var reader = new System.IO.StreamReader(req.Body);
+                var body = await reader.ReadToEndAsync();
+                if (string.IsNullOrWhiteSpace(body))
+                {
+                    return new BadRequestObjectResult("Request body is empty.");
+                }
+
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+
+                if (!root.TryGetProperty("reservationID", out var resIdEl) && !root.TryGetProperty("ReservationID", out resIdEl))
+                {
+                    return new BadRequestObjectResult("reservationID is required.");
+                }
+
+                int reservationId;
+                if (resIdEl.ValueKind == JsonValueKind.Number)
+                {
+                    reservationId = resIdEl.GetInt32();
+                }
+                else if (!int.TryParse(resIdEl.GetString(), out reservationId))
+                {
+                    return new BadRequestObjectResult("reservationID must be a valid integer.");
+                }
+
+                if ((!root.TryGetProperty("From", out var fromEl) && !root.TryGetProperty("from", out fromEl)) || fromEl.ValueKind == JsonValueKind.Null || !fromEl.TryGetDateTime(out var fromDate))
+                {
+                    return new BadRequestObjectResult("From date is required and must be a valid date.");
+                }
+
+                if ((!root.TryGetProperty("To", out var toEl) && !root.TryGetProperty("to", out toEl)) || toEl.ValueKind == JsonValueKind.Null || !toEl.TryGetDateTime(out var toDate))
+                {
+                    return new BadRequestObjectResult("To date is required and must be a valid date.");
+                }
+
+                await using var connection = new SqlConnection(conn);
+                await connection.OpenAsync();
+
+                await using var cmd = connection.CreateCommand();
+                cmd.CommandText = "DELETE FROM Reservation WHERE ReservationID = @reservationId AND [From] = @from AND [To] = @to AND (Status IS NULL OR Status <> 'Paid') AND Source = 'self';";
+                cmd.Parameters.AddWithValue("@reservationId", reservationId);
+                cmd.Parameters.AddWithValue("@from", fromDate.Date);
+                cmd.Parameters.AddWithValue("@to", toDate.Date);
+
+                int rowsAffected = await cmd.ExecuteNonQueryAsync();
+
+                if (rowsAffected == 0)
+                {
+                    return new NotFoundObjectResult("Reservation not found with the given parameters.");
+                }
+
+                return new OkObjectResult(new { Message = "Reservation deleted successfully." });
+            }
+            catch (JsonException jex)
+            {
+                _logger.LogError(jex, "Invalid JSON in delete request body.");
+                return new BadRequestObjectResult("Invalid JSON payload.");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error deleting reservation");
+                return new ObjectResult("Error deleting from database") { StatusCode = 500 };
+            }
+        }
+
         // GET - fetch existing reservations
         var results = new List<Dictionary<string, object?>>();
         try
@@ -128,13 +198,19 @@ public class Reservation
             var oneYearFromToday = today.AddYears(1);
 
             await using var cmd = connection.CreateCommand();
-            if(user == "admin")
-                cmd.CommandText = "SELECT * FROM Reservation";
+            if(reservationid > 0 && !String.IsNullOrWhiteSpace(from) && !String.IsNullOrWhiteSpace(to))
+            {
+                cmd.CommandText = "SELECT ReservationID, Source, FullName, Email, Phone, Status, [From], [To] FROM Reservation WHERE ReservationID = @reservationId AND [From] = @from AND [To] = @to";
+                cmd.Parameters.AddWithValue("@reservationId", reservationid);
+                cmd.Parameters.AddWithValue("@from", from);
+                cmd.Parameters.AddWithValue("@to", to);
+            }
             else
+            {
                 cmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE [To] > @today AND [From] < @oneYear ORDER BY [From] ASC";
-
-            cmd.Parameters.AddWithValue("@today", today);
-            cmd.Parameters.AddWithValue("@oneYear", oneYearFromToday);
+                cmd.Parameters.AddWithValue("@today", today);
+                cmd.Parameters.AddWithValue("@oneYear", oneYearFromToday);
+            }
 
             await using var reader = await cmd.ExecuteReaderAsync();
             while (await reader.ReadAsync())
