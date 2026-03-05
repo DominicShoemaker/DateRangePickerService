@@ -21,7 +21,7 @@ public class Reservation
     }
 
     [Function("Reservation")]
-    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid, string from, string to)
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid = 0, string from = null, string to = null)
     {
         _logger.LogInformation("Processing reservation request and querying database.");
 
