@@ -21,7 +21,7 @@ public class Reservation
     }
 
     [Function("Reservation")]
-    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid = 0, string from = null, string to = null)
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid = 0, string? from = null, string? to = null)
     {
         _logger.LogInformation("Processing reservation request and querying database.");
 
@@ -121,37 +121,17 @@ public class Reservation
         {
             try
             {
-                using var reader = new System.IO.StreamReader(req.Body);
-                var body = await reader.ReadToEndAsync();
-                if (string.IsNullOrWhiteSpace(body))
+                if (reservationid <= 0)
                 {
-                    return new BadRequestObjectResult("Request body is empty.");
+                    return new BadRequestObjectResult("reservationID is required and must be a valid integer.");
                 }
 
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-
-                if (!root.TryGetProperty("reservationID", out var resIdEl) && !root.TryGetProperty("ReservationID", out resIdEl))
-                {
-                    return new BadRequestObjectResult("reservationID is required.");
-                }
-
-                int reservationId;
-                if (resIdEl.ValueKind == JsonValueKind.Number)
-                {
-                    reservationId = resIdEl.GetInt32();
-                }
-                else if (!int.TryParse(resIdEl.GetString(), out reservationId))
-                {
-                    return new BadRequestObjectResult("reservationID must be a valid integer.");
-                }
-
-                if ((!root.TryGetProperty("From", out var fromEl) && !root.TryGetProperty("from", out fromEl)) || fromEl.ValueKind == JsonValueKind.Null || !fromEl.TryGetDateTime(out var fromDate))
+                if (string.IsNullOrWhiteSpace(from) || !DateTime.TryParse(from, out var fromDate))
                 {
                     return new BadRequestObjectResult("From date is required and must be a valid date.");
                 }
 
-                if ((!root.TryGetProperty("To", out var toEl) && !root.TryGetProperty("to", out toEl)) || toEl.ValueKind == JsonValueKind.Null || !toEl.TryGetDateTime(out var toDate))
+                if (string.IsNullOrWhiteSpace(to) || !DateTime.TryParse(to, out var toDate))
                 {
                     return new BadRequestObjectResult("To date is required and must be a valid date.");
                 }
@@ -161,7 +141,7 @@ public class Reservation
 
                 await using var cmd = connection.CreateCommand();
                 cmd.CommandText = "DELETE FROM Reservation WHERE ReservationID = @reservationId AND [From] = @from AND [To] = @to AND (Status IS NULL OR Status <> 'Paid') AND Source = 'self';";
-                cmd.Parameters.AddWithValue("@reservationId", reservationId);
+                cmd.Parameters.AddWithValue("@reservationId", reservationid);
                 cmd.Parameters.AddWithValue("@from", fromDate.Date);
                 cmd.Parameters.AddWithValue("@to", toDate.Date);
 
