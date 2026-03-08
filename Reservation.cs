@@ -484,6 +484,28 @@ public class Reservation
                     }
                 }
             }
+            else if (stripeEvent.Type == "checkout.session.expired")
+            {
+                var session = stripeEvent.Data.Object as Stripe.Checkout.Session;
+                if (session != null)
+                {
+                    _logger.LogInformation("Checkout session {SessionId} expired.", session.Id);
+
+                    var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
+                    if (!string.IsNullOrWhiteSpace(conn))
+                    {
+                        await using var connection = new SqlConnection(conn);
+                        await connection.OpenAsync();
+
+                        await using var deleteCmd = connection.CreateCommand();
+                        deleteCmd.CommandText = "DELETE FROM Reservation WHERE Session = @sessionId";
+                        deleteCmd.Parameters.AddWithValue("@sessionId", session.Id);
+
+                        int rowsDeleted = await deleteCmd.ExecuteNonQueryAsync();
+                        _logger.LogInformation("Deleted {RowsDeleted} reservation(s) for expired session {SessionId}.", rowsDeleted, session.Id);
+                    }
+                }
+            }
             else
             {
                 _logger.LogInformation("Unhandled event type: {EventType}", stripeEvent.Type);
