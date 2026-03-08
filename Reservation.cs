@@ -312,6 +312,7 @@ public class Reservation
 
             var options = new Stripe.Checkout.SessionCreateOptions
             {
+                ExpiresAt = DateTime.UtcNow.AddHours(1),
                 PaymentMethodTypes = new List<string> { "card" },
                 LineItems = new List<Stripe.Checkout.SessionLineItemOptions>
                 {
