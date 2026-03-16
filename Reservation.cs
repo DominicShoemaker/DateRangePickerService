@@ -175,7 +175,7 @@ public class Reservation
 
             // compute filter window: start tomorrow (so To > today) and end one year from today
             var today = DateTime.UtcNow.Date;
-            var oneYearFromToday = today.AddYears(1);
+            var twoYearsFromToday = today.AddYears(2);
 
             await using var cmd = connection.CreateCommand();
             if(reservationid > 0 && !String.IsNullOrWhiteSpace(from) && !String.IsNullOrWhiteSpace(to))
@@ -187,9 +187,9 @@ public class Reservation
             }
             else
             {
-                cmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE [To] > @today AND [From] < @oneYear ORDER BY [From] ASC";
+                cmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE [To] > @today AND [From] < @twoYears ORDER BY [From] ASC";
                 cmd.Parameters.AddWithValue("@today", today);
-                cmd.Parameters.AddWithValue("@oneYear", oneYearFromToday);
+                cmd.Parameters.AddWithValue("@twoYears", twoYearsFromToday);
             }
 
             await using var reader = await cmd.ExecuteReaderAsync();
