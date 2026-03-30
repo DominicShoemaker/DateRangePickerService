@@ -6,13 +6,19 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using Microsoft.Data.SqlClient;
 using System.ClientModel.Primitives;
+using Ical.Net;
+using Google.Apis.Auth.OAuth2;
+using Google.Apis.Calendar.v3;
+using Google.Apis.Calendar.v3.Data;
+using Google.Apis.Services;
+using System.IO;
 
 namespace DateRangePickerService;
 
 public class Reservation
 {
+    private static readonly System.Net.Http.HttpClient _httpClient = new System.Net.Http.HttpClient();
     private readonly ILogger<Reservation> _logger;
 
     public Reservation(ILogger<Reservation> logger)
@@ -20,24 +26,37 @@ public class Reservation
         _logger = logger;
     }
 
-    [Function("Reservation")]
-    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, int reservationid = 0, string? from = null, string? to = null)
+    private CalendarService GetCalendarService()
     {
-        _logger.LogInformation("Processing reservation request and querying database.");
-
-        var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
-        if (string.IsNullOrWhiteSpace(conn))
+        var credentialPath = Environment.GetEnvironmentVariable("GoogleServiceAccountJson") ?? Path.Combine(AppContext.BaseDirectory, "google_service_account.json");
+        GoogleCredential credential;
+        using (var stream = new FileStream(credentialPath, FileMode.Open, FileAccess.Read))
         {
-            _logger.LogError("SqlConnectionString not set in environment.");
-            return new BadRequestObjectResult("Database connection not configured.");
+            credential = GoogleCredential.FromStream(stream).CreateScoped(CalendarService.Scope.Calendar);
         }
+        return new CalendarService(new BaseClientService.Initializer()
+        {
+            HttpClientInitializer = credential,
+            ApplicationName = "CasaDePedra",
+        });
+    }
+
+    private string GetCalendarId()
+    {
+        return Environment.GetEnvironmentVariable("GoogleCalendarId") ?? "casa-de-pedra@copacabana-rio.iam.gserviceaccount.com";
+    }
+
+    [Function("Reservation")]
+    public async Task<IActionResult> Run([HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", "delete", Route = "Reservation/{reservationid?}/{from?}/{to?}")] HttpRequest req, string? reservationid = null, string? from = null, string? to = null)
+    {
+        _logger.LogInformation("Processing reservation request with Google Calendar.");
 
         // POST - create new reservation
         if (string.Equals(req.Method, "POST", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
-                using var reader = new System.IO.StreamReader(req.Body);
+                using var reader = new StreamReader(req.Body);
                 var body = await reader.ReadToEndAsync();
                 if (string.IsNullOrWhiteSpace(body))
                 {
@@ -81,28 +100,29 @@ public class Reservation
                     return new BadRequestObjectResult("To date is required and must be a valid date.");
                 }
 
-                await using var connection = new SqlConnection(conn);
-                await connection.OpenAsync();
+                var service = GetCalendarService();
+                var newEvent = new Event()
+                {
+                    Summary = $"Pending - {fullName ?? "Guest"}",
+                    Description = $"Email: {email}\nPhone: {phone ?? ""}\nSource: {source ?? ""}",
+                    Start = new EventDateTime() { Date = fromDate.ToString("yyyy-MM-dd") },
+                    End = new EventDateTime() { Date = toDate.ToString("yyyy-MM-dd") },
+                    ExtendedProperties = new Event.ExtendedPropertiesData()
+                    {
+                        Private__ = new Dictionary<string, string>
+                        {
+                            { "Email", email },
+                            { "FullName", fullName ?? "" },
+                            { "Phone", phone ?? "" },
+                            { "Source", source ?? "" },
+                            { "Status", "Pending" }
+                        }
+                    }
+                };
 
-                await using var cmd = connection.CreateCommand();
-                cmd.CommandText = @$"INSERT INTO Reservation ({(source == null?"":"Source,")} {(fullName == null?"":"FullName,")} Email, {(phone == null?"":"Phone,")} [From], [To])
-                    VALUES ({(source == null?"":"@source,")} {(fullName == null?"":"@fullName,")} @email, {(phone == null?"":"@phone,")} @from, @to);
-                    SELECT CAST(SCOPE_IDENTITY() AS INT);";
+                var createdEvent = await service.Events.Insert(newEvent, GetCalendarId()).ExecuteAsync();
 
-                if(source != null) cmd.Parameters.AddWithValue("@source", source);
-                cmd.Parameters.AddWithValue("@email", email);
-                if(fullName != null) cmd.Parameters.AddWithValue("@fullName", fullName);
-                if(phone != null) cmd.Parameters.AddWithValue("@phone", phone);
-                cmd.Parameters.AddWithValue("@from", fromDate.Date);
-                cmd.Parameters.AddWithValue("@to", toDate.Date);
-
-                var result = await cmd.ExecuteScalarAsync();
-                int reservationId = result is int i ? i : Convert.ToInt32(result);
-
-                // return 201 Created; location could point to a GET endpoint if available
-                var created = new CreatedResult(string.Empty, new { ReservationID = reservationId });
-                // If you have a route for getting a single reservation, set created.Location accordingly.
-                return created;
+                return new CreatedResult(string.Empty, new { ReservationID = createdEvent.Id });
             }
             catch (JsonException jex)
             {
@@ -111,8 +131,8 @@ public class Reservation
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error inserting reservation");
-                return new ObjectResult("Error writing to database") { StatusCode = 500 };
+                _logger.LogError(ex, "Error inserting reservation in Calendar");
+                return new ObjectResult("Error writing to calendar") { StatusCode = 500 };
             }
         }
 
@@ -121,9 +141,9 @@ public class Reservation
         {
             try
             {
-                if (reservationid <= 0)
+                if (string.IsNullOrWhiteSpace(reservationid))
                 {
-                    return new BadRequestObjectResult("reservationID is required and must be a valid integer.");
+                    return new BadRequestObjectResult("reservationID is required and must be a valid string.");
                 }
 
                 if (string.IsNullOrWhiteSpace(from) || !DateTime.TryParse(from, out var fromDate))
@@ -136,28 +156,29 @@ public class Reservation
                     return new BadRequestObjectResult("To date is required and must be a valid date.");
                 }
 
-                await using var connection = new SqlConnection(conn);
-                await connection.OpenAsync();
-
-                await using var cmd = connection.CreateCommand();
-                cmd.CommandText = "DELETE FROM Reservation WHERE ReservationID = @reservationId AND [From] = @from AND [To] = @to AND (Status IS NULL OR Status <> 'Paid') AND Source = 'self';";
-                cmd.Parameters.AddWithValue("@reservationId", reservationid);
-                cmd.Parameters.AddWithValue("@from", fromDate.Date);
-                cmd.Parameters.AddWithValue("@to", toDate.Date);
-
-                int rowsAffected = await cmd.ExecuteNonQueryAsync();
-
-                if (rowsAffected == 0)
+                var service = GetCalendarService();
+                var ev = await service.Events.Get(GetCalendarId(), reservationid).ExecuteAsync();
+                
+                string evStatus = "";
+                string evSource = "";
+                if (ev.ExtendedProperties?.Private__ != null)
                 {
-                    return new NotFoundObjectResult("Reservation not found with the given parameters.");
+                    ev.ExtendedProperties.Private__.TryGetValue("Status", out evStatus);
+                    ev.ExtendedProperties.Private__.TryGetValue("Source", out evSource);
                 }
+
+                if (evStatus == "Paid" || (evSource != "self" && !string.IsNullOrEmpty(evSource)))
+                {
+                    return new BadRequestObjectResult("Cannot delete a paid or external reservation.");
+                }
+
+                await service.Events.Delete(GetCalendarId(), reservationid).ExecuteAsync();
 
                 return new OkObjectResult(new { Message = "Reservation deleted successfully." });
             }
-            catch (JsonException jex)
+            catch (Google.GoogleApiException)
             {
-                _logger.LogError(jex, "Invalid JSON in delete request body.");
-                return new BadRequestObjectResult("Invalid JSON payload.");
+                return new NotFoundObjectResult("Reservation not found with the given parameters.");
             }
             catch (Exception ex)
             {
@@ -170,44 +191,113 @@ public class Reservation
         var results = new List<Dictionary<string, object?>>();
         try
         {
-            await using var connection = new SqlConnection(conn);
-            await connection.OpenAsync();
-
-            // compute filter window: start tomorrow (so To > today) and end one year from today
             var today = DateTime.UtcNow.Date;
             var twoYearsFromToday = today.AddYears(2);
 
-            await using var cmd = connection.CreateCommand();
-            if(reservationid > 0 && !String.IsNullOrWhiteSpace(from) && !String.IsNullOrWhiteSpace(to))
+            var service = GetCalendarService();
+
+            if (!string.IsNullOrWhiteSpace(reservationid) && reservationid != "0" && !string.IsNullOrWhiteSpace(from) && !string.IsNullOrWhiteSpace(to))
             {
-                cmd.CommandText = "SELECT ReservationID, Source, FullName, Email, Phone, Status, [From], [To] FROM Reservation WHERE ReservationID = @reservationId AND [From] = @from AND [To] = @to";
-                cmd.Parameters.AddWithValue("@reservationId", reservationid);
-                cmd.Parameters.AddWithValue("@from", from);
-                cmd.Parameters.AddWithValue("@to", to);
+                try
+                {
+                    var ev = await service.Events.Get(GetCalendarId(), reservationid).ExecuteAsync();
+                    var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    row["ReservationID"] = ev.Id;
+
+                    string evSource = null, evFullName = null, evEmail = null, evPhone = null, evStatus = null;
+                    if (ev.ExtendedProperties?.Private__ != null)
+                    {
+                        ev.ExtendedProperties.Private__.TryGetValue("Source", out evSource);
+                        ev.ExtendedProperties.Private__.TryGetValue("FullName", out evFullName);
+                        ev.ExtendedProperties.Private__.TryGetValue("Email", out evEmail);
+                        ev.ExtendedProperties.Private__.TryGetValue("Phone", out evPhone);
+                        ev.ExtendedProperties.Private__.TryGetValue("Status", out evStatus);
+                    }
+
+                    row["Source"] = string.IsNullOrEmpty(evSource) ? null : evSource;
+                    row["FullName"] = string.IsNullOrEmpty(evFullName) ? null : evFullName;
+                    row["Email"] = string.IsNullOrEmpty(evEmail) ? null : evEmail;
+                    row["Phone"] = string.IsNullOrEmpty(evPhone) ? null : evPhone;
+                    row["Status"] = string.IsNullOrEmpty(evStatus) ? null : evStatus;
+                    row["From"] = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                    row["To"] = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                    results.Add(row);
+                }
+                catch (Google.GoogleApiException)
+                {
+                    // Not found, do nothing
+                }
             }
             else
             {
-                cmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE [To] > @today AND [From] < @twoYears ORDER BY [From] ASC";
-                cmd.Parameters.AddWithValue("@today", today);
-                cmd.Parameters.AddWithValue("@twoYears", twoYearsFromToday);
-            }
-
-            await using var reader = await cmd.ExecuteReaderAsync();
-            while (await reader.ReadAsync())
-            {
-                var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                for (int i = 0; i < reader.FieldCount; i++)
+                string[] calendarUrls = new string[] 
                 {
-                    var value = await reader.IsDBNullAsync(i) ? null : reader.GetValue(i);
-                    row[reader.GetName(i)] = value;
+                    "https://www.airbnb.com/calendar/ical/1557623945127773122.ics?t=da874a23e0f04dbf87f26e5158ba5fe0",
+                    "http://www.vrbo.com/icalendar/3d2d666e8e5441a4bcaca21f67132314.ics?nonTentative",
+                    "https://calendar.google.com/calendar/ical/casaemrio%40gmail.com/private-3c1cdc8fdf089a0257f411584b605ac0/basic.ics"
+                };
+
+                // Add existing ICAL fetching
+                foreach (var url in calendarUrls)
+                {
+                    try
+                    {
+                        var response = await _httpClient.GetStringAsync(url);
+                        var calendar = Ical.Net.Calendar.Load(response);
+                        foreach (var ev in calendar.Events)
+                        {
+                            if (ev.Summary != null && ev.Summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase))
+                            {
+                                var startDate = ev.DtStart.Value.Date;
+                                var endDate = ev.DtEnd.Value.Date;
+                                
+                                if (endDate > today && startDate < twoYearsFromToday)
+                                {
+                                    var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                                    row["From"] = startDate;
+                                    row["To"] = endDate;
+                                    results.Add(row);
+                                }
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error reading calendar from {Url}", url);
+                    }
                 }
-                results.Add(row);
+
+                // Add items from the new Google Account native calendar database!
+                try {
+                    var request = service.Events.List(GetCalendarId());
+                    request.TimeMinDateTimeOffset = today;
+                    request.TimeMaxDateTimeOffset = twoYearsFromToday;
+                    request.SingleEvents = true;
+                    request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
+                    
+                    var newEvents = await request.ExecuteAsync();
+                    foreach (var ev in newEvents.Items)
+                    {
+                        if (ev.Summary != null && (ev.Summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase) || ev.Summary.StartsWith("Pending", StringComparison.OrdinalIgnoreCase)))
+                        {
+                            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                            row["From"] = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                            row["To"] = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                            results.Add(row);
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    _logger.LogError(e, "Failed aggregating from native google calendar");
+                }
+                
+                results.Sort((a, b) => ((DateTime)a["From"]!).CompareTo((DateTime)b["From"]!));
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error querying Reservation table");
-            _logger.LogError("Connection string used: {Conn}\nexception: {Exception}", conn, ex.ToString());
+            _logger.LogError(ex, "Error querying Reservation database");
             return new ObjectResult("Error querying database") { StatusCode = 500 };
         }
 
@@ -217,18 +307,11 @@ public class Reservation
     [Function("Payment")]
     public async Task<IActionResult> Payment([HttpTrigger(AuthorizationLevel.Anonymous, "post", Route = "Payment")] HttpRequest req)
     {
-        _logger.LogInformation("Processing payment request.");
-
-        var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
-        if (string.IsNullOrWhiteSpace(conn))
-        {
-            _logger.LogError("SqlConnectionString not set in environment.");
-            return new ObjectResult("Database connection not configured.") { StatusCode = 500 };
-        }
+        _logger.LogInformation("Processing payment request via Calendar.");
 
         try
         {
-            using var reader = new System.IO.StreamReader(req.Body);
+            using var reader = new StreamReader(req.Body);
             var body = await reader.ReadToEndAsync();
             if (string.IsNullOrWhiteSpace(body))
             {
@@ -243,15 +326,7 @@ public class Reservation
                 return new BadRequestObjectResult("reservationID is required.");
             }
             
-            int reservationId;
-            if (resIdEl.ValueKind == JsonValueKind.Number)
-            {
-                reservationId = resIdEl.GetInt32();
-            }
-            else if (!int.TryParse(resIdEl.GetString(), out reservationId))
-            {
-                return new BadRequestObjectResult("reservationID must be a valid integer.");
-            }
+            string reservationId = resIdEl.ValueKind == JsonValueKind.Number ? resIdEl.GetInt32().ToString() : resIdEl.GetString()!;
 
             if (!root.TryGetProperty("amount", out var amountEl) && !root.TryGetProperty("Amount", out amountEl))
             {
@@ -276,32 +351,22 @@ public class Reservation
             }
 
             Stripe.StripeConfiguration.ApiKey = stripeKey;
-
             var confirmationUrl = Environment.GetEnvironmentVariable("ConfirmationUrl") ?? $"{req.Scheme}://{req.Host}";
 
-            DateTime fromDate;
-            DateTime toDate;
-
-            await using var connection = new SqlConnection(conn);
-            await connection.OpenAsync();
-
-            await using var selectCmd = connection.CreateCommand();
-            selectCmd.CommandText = "SELECT [From], [To] FROM Reservation WHERE ReservationID = @reservationId";
-            selectCmd.Parameters.AddWithValue("@reservationId", reservationId);
-            await using (var dbReader = await selectCmd.ExecuteReaderAsync())
+            var service = GetCalendarService();
+            Event ev;
+            try
             {
-                if (await dbReader.ReadAsync())
-                {
-                    fromDate = dbReader.GetDateTime(0);
-                    toDate = dbReader.GetDateTime(1);
-                }
-                else
-                {
-                    return new NotFoundObjectResult($"Reservation {reservationId} not found.");
-                }
+                ev = await service.Events.Get(GetCalendarId(), reservationId).ExecuteAsync();
+            }
+            catch
+            {
+                return new NotFoundObjectResult($"Reservation {reservationId} not found.");
             }
 
-            // Compare amount with the price rules
+            DateTime fromDate = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+            DateTime toDate = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+
             var calc = GetCalculator();
             var price = calc.GetTotalAndDiscountedPrice(fromDate.ToString("yyyy-MM-dd"), toDate.ToString("yyyy-MM-dd"));
             if (amount != price.DiscountedPrice)
@@ -320,7 +385,7 @@ public class Reservation
                     {
                         PriceData = new Stripe.Checkout.SessionLineItemPriceDataOptions
                         {
-                            UnitAmountDecimal = amount * 100, // Stripe expects amount in cents
+                            UnitAmountDecimal = amount * 100,
                             Currency = "usd", 
                             ProductData = new Stripe.Checkout.SessionLineItemPriceDataProductDataOptions
                             {
@@ -335,32 +400,16 @@ public class Reservation
                 CancelUrl = $"{confirmationUrl}",
             };
 
-            var service = new Stripe.Checkout.SessionService();
-            Stripe.Checkout.Session session = await service.CreateAsync(options);
+            var stripeService = new Stripe.Checkout.SessionService();
+            Stripe.Checkout.Session session = await stripeService.CreateAsync(options);
 
-            await using var updateCmd = connection.CreateCommand();
-            updateCmd.CommandText = "UPDATE Reservation SET Session = @sessionId WHERE ReservationID = @reservationId";
-            updateCmd.Parameters.AddWithValue("@sessionId", session.Id);
-            updateCmd.Parameters.AddWithValue("@reservationId", reservationId);
-
-            int rowsUpdated = await updateCmd.ExecuteNonQueryAsync();
-            if (rowsUpdated == 0)
-            {
-                _logger.LogWarning("ReservationID {ReservationId} not found in database.", reservationId);
-                return new NotFoundObjectResult($"Reservation {reservationId} not found during update.");
-            }
+            if (ev.ExtendedProperties == null) ev.ExtendedProperties = new Event.ExtendedPropertiesData();
+            if (ev.ExtendedProperties.Private__ == null) ev.ExtendedProperties.Private__ = new Dictionary<string, string>();
+            ev.ExtendedProperties.Private__["SessionId"] = session.Id;
+            
+            await service.Events.Update(ev, GetCalendarId(), ev.Id).ExecuteAsync();
 
             return new OkObjectResult(new { url = session.Url });
-        }
-        catch (JsonException jex)
-        {
-            _logger.LogError(jex, "Invalid JSON in payment request body.");
-            return new BadRequestObjectResult("Invalid JSON payload.");
-        }
-        catch (Stripe.StripeException stripeEx)
-        {
-            _logger.LogError(stripeEx, "Stripe API error.");
-            return new ObjectResult("Payment service error.") { StatusCode = 500 };
         }
         catch (Exception ex)
         {
@@ -374,7 +423,7 @@ public class Reservation
     {
         _logger.LogInformation("Processing Stripe webhook.");
 
-        var json = await new System.IO.StreamReader(req.Body).ReadToEndAsync();
+        var json = await new StreamReader(req.Body).ReadToEndAsync();
         string signatureHeader = req.Headers["Stripe-Signature"].ToString();
         var endpointSecret = Environment.GetEnvironmentVariable("StripeWebhookSecret");
 
@@ -399,87 +448,52 @@ public class Reservation
                 {
                     _logger.LogInformation("Checkout session {SessionId} completed successfully.", session.Id);
 
-                    // Update database - mark reservation as paid and fetch details for email
-                    var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
-                    if (!string.IsNullOrWhiteSpace(conn))
+                    var service = GetCalendarService();
+                    var request = service.Events.List(GetCalendarId());
+                    request.PrivateExtendedProperty = new Google.Apis.Util.Repeatable<string>(new[] { $"SessionId={session.Id}" });
+                    var events = await request.ExecuteAsync();
+
+                    if (events.Items != null && events.Items.Count > 0)
                     {
-                        await using var connection = new SqlConnection(conn);
-                        await connection.OpenAsync();
-
-                        // 1. Fetch Reservation details first
-                        await using var selectCmd = connection.CreateCommand();
-                        selectCmd.CommandText = @"SELECT ReservationID, FullName, Email, [From], [To] 
-                                                  FROM Reservation 
-                                                  WHERE Session = @sessionId";
-                        selectCmd.Parameters.AddWithValue("@sessionId", session.Id);
-
-                        int reservationId = 0;
-                        string fullName = "Guest";
-                        string email = "";
-                        DateTime fromDate = default;
-                        DateTime toDate = default;
-                        bool found = false;
-
-                        await using (var reader = await selectCmd.ExecuteReaderAsync())
+                        var ev = events.Items[0];
+                        ev.Summary = ev.Summary.Replace("Pending -", "Reserved -");
+                        ev.ExtendedProperties.Private__["Status"] = "Paid";
+                        await service.Events.Update(ev, GetCalendarId(), ev.Id).ExecuteAsync();
+                        
+                        string reservationId = ev.Id;
+                        string fullName = ev.ExtendedProperties.Private__.ContainsKey("FullName") ? ev.ExtendedProperties.Private__["FullName"] : "Guest";
+                        string email = ev.ExtendedProperties.Private__.ContainsKey("Email") ? ev.ExtendedProperties.Private__["Email"] : "";
+                        DateTime fromDate = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                        DateTime toDate = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                        
+                        int nights = (int)(toDate - fromDate).TotalDays;
+                        decimal amountPaid = (session.AmountTotal ?? 0) / 100m;
+                        
+                        var connectionString = Environment.GetEnvironmentVariable("COMMUNICATION_SERVICES_CONNECTION_STRING");
+                        if (!string.IsNullOrEmpty(connectionString) && !string.IsNullOrEmpty(email))
                         {
-                            if (await reader.ReadAsync())
+                            try
                             {
-                                reservationId = reader.GetInt32(0);
-                                fullName = reader.IsDBNull(1) ? "Guest" : reader.GetString(1);
-                                email = reader.GetString(2);
-                                fromDate = reader.GetDateTime(3);
-                                toDate = reader.GetDateTime(4);
-                                found = true;
+                                var emailClient = new Azure.Communication.Email.EmailClient(connectionString);
+                                var subject = $"Booking Confirmation - Reservation #{reservationId}";
+                                var formattedAmount = amountPaid.ToString("C", System.Globalization.CultureInfo.CreateSpecificCulture("en-US"));
+                                var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd} after 3PM\nCheck-out: {toDate:yyyy-MM-dd} before 11AM\nTotal Nights: {nights}\nAmount Paid: {formattedAmount}\n\nWe look forward to hosting you!\n\nCasaDePedra.rio";
+                                var sender = "DoNotReply@casadepedra.rio";
+                                
+                                var emailMessage = new Azure.Communication.Email.EmailMessage(
+                                    senderAddress: sender,
+                                    recipientAddress: email,
+                                    content: new Azure.Communication.Email.EmailContent(subject)
+                                    {
+                                        PlainText = plainTextContent
+                                    });
+
+                                await emailClient.SendAsync(Azure.WaitUntil.Started, emailMessage);
+                                _logger.LogInformation("Confirmation email is sent to {Email}.", email);
                             }
-                        }
-
-                        if (found)
-                        {
-                            // 2. Update status to 'Paid'
-                            await using var updateCmd = connection.CreateCommand();
-                            updateCmd.CommandText = "UPDATE Reservation SET Status = 'Paid' WHERE Session = @sessionId";
-                            updateCmd.Parameters.AddWithValue("@sessionId", session.Id);
-                            await updateCmd.ExecuteNonQueryAsync();
-                            
-                            int nights = (int)(toDate - fromDate).TotalDays;
-                            decimal amountPaid = (session.AmountTotal ?? 0) / 100m;
-                            
-                            // Send Email via Azure Communication Services
-                            var connectionString = Environment.GetEnvironmentVariable("COMMUNICATION_SERVICES_CONNECTION_STRING");
-
-                            if (!string.IsNullOrEmpty(connectionString))
+                            catch (Exception emailEx)
                             {
-                                try
-                                {
-                                    var emailClient = new Azure.Communication.Email.EmailClient(connectionString);
-
-                                    var subject = $"Booking Confirmation - Reservation #{reservationId}";
-                                    var formattedAmount = amountPaid.ToString("C", System.Globalization.CultureInfo.CreateSpecificCulture("en-US"));
-                                    var plainTextContent = $"Dear {fullName},\n\nThank you for your payment. Your booking has been confirmed.\n\nReservation Details:\nReservation ID: {reservationId}\nCheck-in: {fromDate:yyyy-MM-dd} after 3PM\nCheck-out: {toDate:yyyy-MM-dd} before 11AM\nTotal Nights: {nights}\nAmount Paid: {formattedAmount}\n\nWe look forward to hosting you!\n\nCasaDePedra.rio";
-                                    var sender = "DoNotReply@casadepedra.rio";
-                                    
-                                    var emailMessage = new Azure.Communication.Email.EmailMessage(
-                                        senderAddress: sender,
-                                        recipientAddress: email,
-                                        content: new Azure.Communication.Email.EmailContent(subject)
-                                        {
-                                            PlainText = plainTextContent
-                                        });
-
-                                    Azure.Communication.Email.EmailSendOperation emailSendOperation = await emailClient.SendAsync(
-                                        Azure.WaitUntil.Started,
-                                        emailMessage);
-
-                                    _logger.LogInformation("Confirmation email is sent to {Email}. Operation Id: {OperationId}", email, emailSendOperation.Id);
-                                }
-                                catch (Exception emailEx)
-                                {
-                                    _logger.LogError(emailEx, "Failed to send confirmation email.");
-                                }
-                            }
-                            else
-                            {
-                                _logger.LogWarning("COMMUNICATION_SERVICES_CONNECTION_STRING is missing. Cannot send confirmation email.");
+                                _logger.LogError(emailEx, "Failed to send confirmation email.");
                             }
                         }
                     }
@@ -492,32 +506,21 @@ public class Reservation
                 {
                     _logger.LogInformation("Checkout session {SessionId} expired.", session.Id);
 
-                    var conn = Environment.GetEnvironmentVariable("SqlConnectionString");
-                    if (!string.IsNullOrWhiteSpace(conn))
+                    var service = GetCalendarService();
+                    var request = service.Events.List(GetCalendarId());
+                    request.PrivateExtendedProperty = new Google.Apis.Util.Repeatable<string>(new[] { $"SessionId={session.Id}" });
+                    var events = await request.ExecuteAsync();
+
+                    if (events.Items != null && events.Items.Count > 0)
                     {
-                        await using var connection = new SqlConnection(conn);
-                        await connection.OpenAsync();
-
-                        await using var deleteCmd = connection.CreateCommand();
-                        deleteCmd.CommandText = "DELETE FROM Reservation WHERE Session = @sessionId";
-                        deleteCmd.Parameters.AddWithValue("@sessionId", session.Id);
-
-                        int rowsDeleted = await deleteCmd.ExecuteNonQueryAsync();
-                        _logger.LogInformation("Deleted {RowsDeleted} reservation(s) for expired session {SessionId}.", rowsDeleted, session.Id);
+                        var ev = events.Items[0];
+                        await service.Events.Delete(GetCalendarId(), ev.Id).ExecuteAsync();
+                        _logger.LogInformation("Deleted expired session {SessionId}.", session.Id);
                     }
                 }
             }
-            else
-            {
-                _logger.LogInformation("Unhandled event type: {EventType}", stripeEvent.Type);
-            }
 
             return new OkResult();
-        }
-        catch (Stripe.StripeException e)
-        {
-            _logger.LogError(e, "Invalid Stripe signature.");
-            return new BadRequestObjectResult("Invalid payload or signature.");
         }
         catch (Exception ex)
         {
