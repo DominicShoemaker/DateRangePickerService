@@ -28,12 +28,22 @@ public class Reservation
 
     private CalendarService GetCalendarService()
     {
-        var credentialPath = Environment.GetEnvironmentVariable("GoogleServiceAccountJson") ?? Path.Combine(AppContext.BaseDirectory, "google_service_account.json");
+        string? jsonKey = Environment.GetEnvironmentVariable("GCP_SERVICE_ACCOUNT_KEY");
         GoogleCredential credential;
-        using (var stream = new FileStream(credentialPath, FileMode.Open, FileAccess.Read))
+        
+        if (!string.IsNullOrWhiteSpace(jsonKey))
         {
-            credential = GoogleCredential.FromStream(stream).CreateScoped(CalendarService.Scope.Calendar);
+            credential = GoogleCredential.FromJson(jsonKey).CreateScoped(CalendarService.Scope.Calendar);
         }
+        else
+        {
+            var credentialPath = Path.Combine(AppContext.BaseDirectory, "google_service_account.json");
+            using (var stream = new FileStream(credentialPath, FileMode.Open, FileAccess.Read))
+            {
+                credential = GoogleCredential.FromStream(stream).CreateScoped(CalendarService.Scope.Calendar);
+            }
+        }
+
         return new CalendarService(new BaseClientService.Initializer()
         {
             HttpClientInitializer = credential,
