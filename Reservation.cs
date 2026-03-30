@@ -47,7 +47,7 @@ public class Reservation
         return new CalendarService(new BaseClientService.Initializer()
         {
             HttpClientInitializer = credential,
-            ApplicationName = "CasaDePedra",
+            ApplicationName = "Casa de Pedra - Google Calendar",
         });
     }
 
@@ -242,8 +242,8 @@ public class Reservation
             {
                 string[] calendarUrls = new string[] 
                 {
-//                    "https://www.airbnb.com/calendar/ical/1557623945127773122.ics?t=da874a23e0f04dbf87f26e5158ba5fe0",
-//                    "http://www.vrbo.com/icalendar/3d2d666e8e5441a4bcaca21f67132314.ics?nonTentative",
+                    "https://www.airbnb.com/calendar/ical/1557623945127773122.ics?t=da874a23e0f04dbf87f26e5158ba5fe0",
+                    "http://www.vrbo.com/icalendar/3d2d666e8e5441a4bcaca21f67132314.ics?nonTentative",
                     "https://calendar.google.com/calendar/ical/casaemrio%40gmail.com/private-3c1cdc8fdf089a0257f411584b605ac0/basic.ics"
                 };
 
