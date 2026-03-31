@@ -29,20 +29,14 @@ public class Reservation
     private CalendarService GetCalendarService()
     {
         string? jsonKey = Environment.GetEnvironmentVariable("GCP_SERVICE_ACCOUNT_KEY");
-        GoogleCredential credential;
-        
-        if (!string.IsNullOrWhiteSpace(jsonKey))
+        if (string.IsNullOrWhiteSpace(jsonKey))
         {
-            credential = GoogleCredential.FromJson(jsonKey).CreateScoped(CalendarService.Scope.Calendar);
+            var ex = new InvalidOperationException("GCP_SERVICE_ACCOUNT_KEY environment variable is not set.");
+            _logger.LogError(ex, "Google service account key is required via environment variable.");
+            throw ex;
         }
-        else
-        {
-            var credentialPath = Path.Combine(AppContext.BaseDirectory, "google_service_account.json");
-            using (var stream = new FileStream(credentialPath, FileMode.Open, FileAccess.Read))
-            {
-                credential = GoogleCredential.FromStream(stream).CreateScoped(CalendarService.Scope.Calendar);
-            }
-        }
+
+        var credential = GoogleCredential.FromJson(jsonKey).CreateScoped(CalendarService.Scope.Calendar);
 
         return new CalendarService(new BaseClientService.Initializer()
         {
@@ -53,7 +47,12 @@ public class Reservation
 
     private string GetCalendarId()
     {
-        return Environment.GetEnvironmentVariable("GoogleCalendarId");
+        var id = Environment.GetEnvironmentVariable("GoogleCalendarId");
+        if (string.IsNullOrWhiteSpace(id))
+        {
+            throw new InvalidOperationException("GoogleCalendarId environment variable is not set.");
+        }
+        return id!;
     }
 
     [Function("Reservation")]
@@ -117,6 +116,13 @@ public class Reservation
                 {
                     return new BadRequestObjectResult("Requested date range is not available.");
                 }
+
+                if (service == null)
+                {
+                    // Cannot create calendar event without Google Calendar service
+                    _logger.LogError("Google Calendar service is not available; cannot create reservation.");
+                    return new ObjectResult("Calendar service unavailable.") { StatusCode = 503 };
+                }
                 var newEvent = new Event()
                 {
                     Summary = $"Pending - {fullName ?? "Guest"}",
@@ -144,6 +150,21 @@ public class Reservation
             {
                 _logger.LogError(jex, "Invalid JSON in request body.");
                 return new BadRequestObjectResult("Invalid JSON payload.");
+            }
+            catch (FileNotFoundException fex)
+            {
+                _logger.LogError(fex, "Required file missing: {Message}", fex.Message);
+                return new ObjectResult(fex.Message) { StatusCode = 500 };
+            }
+            catch (InvalidDataException idex)
+            {
+                _logger.LogError(idex, "Invalid configuration: {Message}", idex.Message);
+                return new ObjectResult(idex.Message) { StatusCode = 500 };
+            }
+            catch (InvalidOperationException ioex)
+            {
+                _logger.LogError(ioex, "Configuration error: {Message}", ioex.Message);
+                return new ObjectResult(ioex.Message) { StatusCode = 500 };
             }
             catch (Exception ex)
             {
@@ -243,6 +264,16 @@ public class Reservation
                 {
                     // Not found, do nothing
                 }
+                catch (FileNotFoundException fex)
+                {
+                    _logger.LogError(fex, "Required file missing: {Message}", fex.Message);
+                    return new ObjectResult(fex.Message) { StatusCode = 500 };
+                }
+                catch (InvalidOperationException ioex)
+                {
+                    _logger.LogError(ioex, "Configuration error: {Message}", ioex.Message);
+                    return new ObjectResult(ioex.Message) { StatusCode = 500 };
+                }
             }
             else
             {
@@ -278,14 +309,14 @@ public class Reservation
                     }
                 }
 
-                // Add items from the new Google Account native calendar database!
+                // Add items from the new Google Account native calendar
                 try {
                     var request = service.Events.List(GetCalendarId());
                     request.TimeMinDateTimeOffset = today;
                     request.TimeMaxDateTimeOffset = twoYearsFromToday;
                     request.SingleEvents = true;
                     request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
-                    
+
                     var newEvents = await request.ExecuteAsync();
                     foreach (var ev in newEvents.Items)
                     {
@@ -298,6 +329,16 @@ public class Reservation
                         }
                     }
                 }
+                catch (FileNotFoundException fex)
+                {
+                    _logger.LogError(fex, "Required file missing: {Message}", fex.Message);
+                    return new ObjectResult(fex.Message) { StatusCode = 500 };
+                }
+                catch (InvalidOperationException ioex)
+                {
+                    _logger.LogError(ioex, "Configuration error: {Message}", ioex.Message);
+                    return new ObjectResult(ioex.Message) { StatusCode = 500 };
+                }
                 catch (Exception e)
                 {
                     _logger.LogError(e, "Failed aggregating from native google calendar");
@@ -308,7 +349,7 @@ public class Reservation
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error querying Reservation database");
+            _logger.LogError(ex, "Error querying Calendar");
             return new ObjectResult("Error querying database") { StatusCode = 500 };
         }
 
@@ -550,15 +591,23 @@ public class Reservation
     private IEnumerable<string> GetCalendarUrls()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "calendars.json");
-        try
+        if (!File.Exists(path))
         {
-            return JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
+            var ex = new FileNotFoundException("calendars.json not found.", path);
+            _logger.LogError(ex, "Required calendars.json is missing.");
+            throw ex;
         }
-        catch (Exception ex)
+
+        var txt = File.ReadAllText(path);
+        var urls = JsonSerializer.Deserialize<List<string>>(txt);
+        if (urls == null || urls.Count == 0)
         {
-            _logger.LogError(ex, "Failed to read calendars.json, falling back to defaults.");
+            var ex = new InvalidDataException("calendars.json is empty or invalid.");
+            _logger.LogError(ex, "Required calendars.json is invalid.");
+            throw ex;
         }
-        return null;
+
+        return urls;
     }
 
     private async Task<bool> IsRangeAvailable(CalendarService service, DateTime fromDate, DateTime toDate)
