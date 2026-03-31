@@ -53,7 +53,7 @@ public class Reservation
 
     private string GetCalendarId()
     {
-        return Environment.GetEnvironmentVariable("GoogleCalendarId") ?? "casa-de-pedra@copacabana-rio.iam.gserviceaccount.com";
+        return Environment.GetEnvironmentVariable("GoogleCalendarId");
     }
 
     [Function("Reservation")]
@@ -111,6 +111,12 @@ public class Reservation
                 }
 
                 var service = GetCalendarService();
+
+                // Verify the requested date range is still available before creating a pending reservation
+                if (!await IsRangeAvailable(service, fromDate, toDate))
+                {
+                    return new BadRequestObjectResult("Requested date range is not available.");
+                }
                 var newEvent = new Event()
                 {
                     Summary = $"Pending - {fullName ?? "Guest"}",
@@ -240,12 +246,7 @@ public class Reservation
             }
             else
             {
-                string[] calendarUrls = new string[] 
-                {
-                    "https://www.airbnb.com/calendar/ical/1557623945127773122.ics?t=da874a23e0f04dbf87f26e5158ba5fe0",
-                    "http://www.vrbo.com/icalendar/3d2d666e8e5441a4bcaca21f67132314.ics?nonTentative",
-                    "https://calendar.google.com/calendar/ical/casaemrio%40gmail.com/private-3c1cdc8fdf089a0257f411584b605ac0/basic.ics"
-                };
+                var calendarUrls = GetCalendarUrls();
 
                 // Add existing ICAL fetching
                 foreach (var url in calendarUrls)
@@ -544,5 +545,91 @@ public class Reservation
         string rulesPath = Path.Combine(AppContext.BaseDirectory, "price_rules.json");
         var rules = PriceRules.CreateFromJson(rulesPath);
         return new PriceCalculator(rules);
+    }
+
+    private IEnumerable<string> GetCalendarUrls()
+    {
+        var path = Path.Combine(AppContext.BaseDirectory, "calendars.json");
+        try
+        {
+            return JsonSerializer.Deserialize<List<string>>(File.ReadAllText(path));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to read calendars.json, falling back to defaults.");
+        }
+        return null;
+    }
+
+    private async Task<bool> IsRangeAvailable(CalendarService service, DateTime fromDate, DateTime toDate)
+    {
+        // Normalize to date-only
+        var reqStart = fromDate.Date;
+        var reqEnd = toDate.Date;
+
+        // Check ICAL feeds
+        var calendarUrls = GetCalendarUrls();
+        foreach (var url in calendarUrls)
+        {
+            try
+            {
+                var response = await _httpClient.GetStringAsync(url);
+                var calendar = Ical.Net.Calendar.Load(response);
+                foreach (var ev in calendar.Events)
+                {
+                    var summary = ev.Summary ?? string.Empty;
+                    if (!summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase) && !summary.StartsWith("Pending", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var evStart = ev.DtStart.Value.Date;
+                    var evEnd = ev.DtEnd.Value.Date;
+
+                    // Overlap if not (evEnd <= reqStart || evStart >= reqEnd)
+                    if (!(evEnd <= reqStart || evStart >= reqEnd))
+                    {
+                        return false;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error reading calendar from {Url}", url);
+            }
+        }
+
+        // Check Google native calendar
+        try
+        {
+            var request = service.Events.List(GetCalendarId());
+            request.TimeMinDateTimeOffset = reqStart;
+            request.TimeMaxDateTimeOffset = reqEnd;
+            request.SingleEvents = true;
+            request.OrderBy = EventsResource.ListRequest.OrderByEnum.StartTime;
+
+            var newEvents = await request.ExecuteAsync();
+            if (newEvents.Items != null)
+            {
+                foreach (var ev in newEvents.Items)
+                {
+                    if (ev.Summary == null) continue;
+                    if (!(ev.Summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase) || ev.Summary.StartsWith("Pending", StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    var evStart = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+                    var evEnd = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+
+                    if (!(evEnd <= reqStart || evStart >= reqEnd))
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed aggregating from native google calendar when checking availability");
+        }
+
+        return true;
     }
 }
