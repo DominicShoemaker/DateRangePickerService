@@ -258,7 +258,97 @@ public class Reservation
                     row["Status"] = string.IsNullOrEmpty(evStatus) ? null : evStatus;
                     row["From"] = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
                     row["To"] = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
-                    results.Add(row);
+
+                    // If it is "Pending" and somebody else has booked the same dates, delete the "Pending" reservation
+                    bool overlapWithReserved = false;
+                    if (ev.Summary != null && ev.Summary.StartsWith("Pending", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var reqStart = ((DateTime)row["From"]!).Date;
+                        var reqEnd = ((DateTime)row["To"]!).Date;
+
+                        // Check ICAL feeds
+                        var calendarUrls = GetCalendarUrls();
+                        foreach (var url in calendarUrls)
+                        {
+                            try
+                            {
+                                var response = await _httpClient.GetStringAsync(url);
+                                var calendar = Ical.Net.Calendar.Load(response);
+                                foreach (var calEv in calendar.Events)
+                                {
+                                    if (calEv.Summary != null && calEv.Summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        var evStart = calEv.DtStart.Value.Date;
+                                        var evEnd = calEv.DtEnd.Value.Date;
+                                        if (!(evEnd <= reqStart || evStart >= reqEnd))
+                                        {
+                                            overlapWithReserved = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Error reading calendar from {Url}", url);
+                            }
+                            if (overlapWithReserved) break;
+                        }
+
+                        // Check native calendar
+                        if (!overlapWithReserved)
+                        {
+                            try
+                            {
+                                var request = service.Events.List(GetCalendarId());
+                                request.TimeMinDateTimeOffset = reqStart;
+                                request.TimeMaxDateTimeOffset = reqEnd;
+                                request.SingleEvents = true;
+
+                                var existingEvents = await request.ExecuteAsync();
+                                if (existingEvents.Items != null)
+                                {
+                                    foreach (var existEv in existingEvents.Items)
+                                    {
+                                        if (existEv.Id == ev.Id) continue;
+                                        
+                                        if (existEv.Summary != null && existEv.Summary.StartsWith("Reserved", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            var existStart = DateTime.Parse(existEv.Start.Date ?? existEv.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!).Date;
+                                            var existEnd = DateTime.Parse(existEv.End.Date ?? existEv.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!).Date;
+                                            if (!(existEnd <= reqStart || existStart >= reqEnd))
+                                            {
+                                                overlapWithReserved = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError(ex, "Error checking Google Native calendar for overlap.");
+                            }
+                        }
+
+                        if (overlapWithReserved)
+                        {
+                            _logger.LogInformation("Pending event {EventId} overlaps with Reserved, deleting.", ev.Id);
+                            try
+                            {
+                                await service.Events.Delete(GetCalendarId(), ev.Id).ExecuteAsync();
+                            }
+                            catch (Exception delEx)
+                            {
+                                _logger.LogError(delEx, "Failed to delete Pending event");
+                            }
+                        }
+                    }
+
+                    if (!overlapWithReserved)
+                    {
+                        results.Add(row);
+                    }
                 }
                 catch (Google.GoogleApiException)
                 {
