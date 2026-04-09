@@ -455,6 +455,8 @@ public class Reservation
         {
             using var reader = new StreamReader(req.Body);
             var body = await reader.ReadToEndAsync();
+            _logger.LogInformation("Payment request body: {Body}", body);
+            
             if (string.IsNullOrWhiteSpace(body))
             {
                 return new BadRequestObjectResult("Request body is empty.");
@@ -469,6 +471,7 @@ public class Reservation
             }
             
             string reservationId = resIdEl.ValueKind == JsonValueKind.Number ? resIdEl.GetInt32().ToString() : resIdEl.GetString()!;
+            _logger.LogInformation("Payment for reservation: {ReservationId}", reservationId);
 
             if (!root.TryGetProperty("amount", out var amountEl) && !root.TryGetProperty("Amount", out amountEl))
             {
@@ -484,6 +487,7 @@ public class Reservation
             {
                 return new BadRequestObjectResult("amount must be a valid number.");
             }
+            _logger.LogInformation("Payment amount: {Amount}", amount);
 
             var stripeKey = Environment.GetEnvironmentVariable("StripeSecretKey");
             if (string.IsNullOrWhiteSpace(stripeKey))
@@ -499,18 +503,24 @@ public class Reservation
             Event ev;
             try
             {
+                _logger.LogInformation("Fetching event {ReservationId} from calendar", reservationId);
                 ev = await service.Events.Get(GetCalendarId(), reservationId).ExecuteAsync();
+                _logger.LogInformation("Event found: {EventTitle}", ev.Summary);
             }
-            catch
+            catch (Exception calEx)
             {
+                _logger.LogError(calEx, "Failed to fetch reservation {ReservationId}", reservationId);
                 return new NotFoundObjectResult($"Reservation {reservationId} not found.");
             }
 
             DateTime fromDate = DateTime.Parse(ev.Start.Date ?? ev.Start.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
             DateTime toDate = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
+            _logger.LogInformation("Event dates: {FromDate} to {ToDate}", fromDate, toDate);
 
             var calc = GetCalculator();
             var price = calc.GetTotalAndDiscountedPrice(fromDate.ToString("yyyy-MM-dd"), toDate.ToString("yyyy-MM-dd"));
+            _logger.LogInformation("Calculated price: {DiscountedPrice}, Amount provided: {Amount}", price.DiscountedPrice, amount);
+            
             if (amount != price.DiscountedPrice)
             {
                 _logger.LogError("Amount {amount} does not match the price rules {price}", amount, price.DiscountedPrice);
@@ -542,20 +552,23 @@ public class Reservation
                 CancelUrl = $"{confirmationUrl}",
             };
 
+            _logger.LogInformation("Creating Stripe session for reservation {ReservationId}", reservationId);
             var stripeService = new Stripe.Checkout.SessionService();
             Stripe.Checkout.Session session = await stripeService.CreateAsync(options);
+            _logger.LogInformation("Stripe session created: {SessionId}", session.Id);
 
             if (ev.ExtendedProperties == null) ev.ExtendedProperties = new Event.ExtendedPropertiesData();
             if (ev.ExtendedProperties.Private__ == null) ev.ExtendedProperties.Private__ = new Dictionary<string, string>();
             ev.ExtendedProperties.Private__["SessionId"] = session.Id;
             
             await service.Events.Update(ev, GetCalendarId(), ev.Id).ExecuteAsync();
+            _logger.LogInformation("Updated event with session ID: {SessionId}", session.Id);
 
             return new OkObjectResult(new { url = session.Url });
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing payment");
+            _logger.LogError(ex, "Error processing payment - Exception type: {ExceptionType}, Message: {Message}, StackTrace: {StackTrace}", ex.GetType().Name, ex.Message, ex.StackTrace);
             return new ObjectResult("Error processing payment") { StatusCode = 500 };
         }
     }
