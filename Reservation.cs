@@ -13,6 +13,8 @@ using Google.Apis.Calendar.v3;
 using Google.Apis.Calendar.v3.Data;
 using Google.Apis.Services;
 using System.IO;
+using System.Globalization;
+using System.Net.Http.Json;
 
 namespace DateRangePickerService;
 
@@ -24,6 +26,53 @@ public class Reservation
     public Reservation(ILogger<Reservation> logger)
     {
         _logger = logger;
+    }
+
+    private async Task<decimal> GetAuthoritativePriceAsync(DateTime fromDate, DateTime toDate, CancellationToken cancellationToken)
+    {
+        var pricingApiBaseUrl = Environment.GetEnvironmentVariable("PricingApiBaseUrl")?.TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(pricingApiBaseUrl) || !Uri.TryCreate(pricingApiBaseUrl, UriKind.Absolute, out var pricingApiUri) || pricingApiUri.Scheme != Uri.UriSchemeHttps)
+        {
+            throw new InvalidOperationException("PricingApiBaseUrl must be configured as an absolute HTTPS URL.");
+        }
+
+        using var response = await _httpClient.PostAsJsonAsync(
+            new Uri(pricingApiUri, "/api/v1/pricing/evaluate-stay"),
+            new
+            {
+                checkIn = fromDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                checkOut = toDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            },
+            cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError("Authoritative pricing API returned HTTP {StatusCode}.", (int)response.StatusCode);
+            throw new InvalidOperationException("Authoritative pricing is temporarily unavailable.");
+        }
+
+        using var quoteDocument = JsonDocument.Parse(await response.Content.ReadAsStreamAsync(cancellationToken));
+        if (!quoteDocument.RootElement.TryGetProperty("totalBeforeFeesAndTax", out var totalElement))
+        {
+            throw new InvalidOperationException("Authoritative pricing response did not contain a total.");
+        }
+
+        decimal total;
+        if (totalElement.ValueKind == JsonValueKind.Number)
+        {
+            total = totalElement.GetDecimal();
+        }
+        else if (totalElement.ValueKind != JsonValueKind.String || !decimal.TryParse(totalElement.GetString(), NumberStyles.Number, CultureInfo.InvariantCulture, out total))
+        {
+            throw new InvalidOperationException("Authoritative pricing response contained an invalid total.");
+        }
+
+        if (total <= 0)
+        {
+            throw new InvalidOperationException("Authoritative pricing response contained a non-positive total.");
+        }
+
+        return total;
     }
 
     private CalendarService GetCalendarService()
@@ -455,8 +504,7 @@ public class Reservation
         {
             using var reader = new StreamReader(req.Body);
             var body = await reader.ReadToEndAsync();
-            _logger.LogInformation("Payment request body: {Body}", body);
-            
+
             if (string.IsNullOrWhiteSpace(body))
             {
                 return new BadRequestObjectResult("Request body is empty.");
@@ -472,22 +520,6 @@ public class Reservation
             
             string reservationId = resIdEl.ValueKind == JsonValueKind.Number ? resIdEl.GetInt32().ToString() : resIdEl.GetString()!;
             _logger.LogInformation("Payment for reservation: {ReservationId}", reservationId);
-
-            if (!root.TryGetProperty("amount", out var amountEl) && !root.TryGetProperty("Amount", out amountEl))
-            {
-                return new BadRequestObjectResult("amount is required.");
-            }
-            
-            decimal amount;
-            if (amountEl.ValueKind == JsonValueKind.Number)
-            {
-                amount = amountEl.GetDecimal();
-            }
-            else if (!decimal.TryParse(amountEl.GetString(), out amount))
-            {
-                return new BadRequestObjectResult("amount must be a valid number.");
-            }
-            _logger.LogInformation("Payment amount: {Amount}", amount);
 
             var stripeKey = Environment.GetEnvironmentVariable("StripeSecretKey");
             if (string.IsNullOrWhiteSpace(stripeKey))
@@ -517,14 +549,16 @@ public class Reservation
             DateTime toDate = DateTime.Parse(ev.End.Date ?? ev.End.DateTimeDateTimeOffset?.ToString("yyyy-MM-dd")!);
             _logger.LogInformation("Event dates: {FromDate} to {ToDate}", fromDate, toDate);
 
-            var calc = GetCalculator();
-            var price = calc.GetTotalAndDiscountedPrice(fromDate.ToString("yyyy-MM-dd"), toDate.ToString("yyyy-MM-dd"));
-            _logger.LogInformation("Calculated price: {DiscountedPrice}, Amount provided: {Amount}", price.DiscountedPrice, amount);
-            
-            if (amount != price.DiscountedPrice)
+            decimal amount;
+            try
             {
-                _logger.LogError("Amount {amount} does not match the price rules {price}", amount, price.DiscountedPrice);
-                return new BadRequestObjectResult("amount does not match the price rules.");
+                amount = await GetAuthoritativePriceAsync(fromDate, toDate, req.HttpContext.RequestAborted);
+                _logger.LogInformation("Authoritative price calculated for reservation {ReservationId}.", reservationId);
+            }
+            catch (Exception pricingException)
+            {
+                _logger.LogError(pricingException, "Authoritative pricing failed for reservation {ReservationId}.", reservationId);
+                return new ObjectResult("Pricing service is temporarily unavailable.") { StatusCode = StatusCodes.Status503ServiceUnavailable };
             }
 
             var options = new Stripe.Checkout.SessionCreateOptions
