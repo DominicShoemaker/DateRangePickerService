@@ -1,7 +1,7 @@
 # API Documentation & Architecture: CasaDePedra DateRangePickerService
 
 ## High-Level Summary
-The `DateRangePickerService` is a C# .NET Azure Functions application that acts as the backend reservation and pricing engine for the Casa de Pedra booking system. It manages dynamic pricing based on configured rules (`price_rules.json`), and persists reservations natively via the Google Calendar API and supplementary external iCal feeds.
+The `DateRangePickerService` is a C# .NET Azure Functions application for Casa de Pedra reservation availability, pending holds, Stripe checkout, cancellation, and payment webhooks. It persists reservations through the Google Calendar API and supplementary external iCal feeds. Authoritative prices come from the separately deployed JavaScript pricing API configured by `PricingApiBaseUrl`.
 
 The architecture fundamentally bypasses traditional relational database requirements by treating Google Calendar as the central source of truth for concurrency and availability. Stripe API integration handles payment processing, interacting via asynchronous webhooks to transition bookings from 'Pending' to 'Reserved' automatically.
 
@@ -42,8 +42,7 @@ Removes an unfinalized or cancelled reservation from the Google calendar.
 Initializes a secure Stripe Checkout session.
 - **Why**: Re-evaluates pricing logic purely on the backend to enforce the correct total avoiding typical exploit vectors where a client might tamper with front-end price requests.
 - **Body Arguments**:
-  - `reservationID` (string): Internal ID mapping to the calendar element.
-  - `amount` (decimal): The total frontend requested, evaluated securely against `DateRangePrice`.
+  - `reservationID` (string): Internal ID mapping to the calendar element. The Function reads the reservation dates from Google Calendar and requests the authoritative amount from `PricingApiBaseUrl`; it does not trust a browser-supplied amount.
 - **Returns**: `200 OK` exposing `{ url: <StripeCheckoutUrl> }` to redirect the user.
 - **Potential Exceptions**: Returns `400 BadRequest` if the proposed `amount` violates internal price rule validation calculations, or `404 NotFound` if the reservation mapping does not exist.
 
@@ -52,41 +51,10 @@ Standard asynchronous Stripe Webhook Listener.
 - **Why**: Ensures safe finalization of states. Connects the dots when a `checkout.session.completed` event is pinged: updates Google events from "Pending" to "Paid", fires off a booking confirmation via Azure Communication Services, or terminates stale events completely on `checkout.session.expired` to cleanly free up availability.
 - **Returns**: Immediately drops a `200 OK` back to Stripe to acknowledge payload delivery, preventing duplicate webhooks.
 
----
-
-### 3. Pricing Engine (`DateRangePrice.cs` & `PriceCalculator.cs`)
-
-#### `GET /api/price-rules`
-Returns the raw internal `price_rules.json` file.
-- **Why**: Allows the frontend to locally replicate base rule logic enabling a dynamic Javascript UI without incurring backend latency per date clicked.
-
-#### `GET /api/price/{date}`
-Fetches the calculated price for an individual date.
-- **Parameters**: `date` (string `YYYY-MM-DD`). 
-- **Returns**: `200 OK` providing the decimal price.
-
-#### `GET /api/price/{from}/{to}`
-Provides a vectorized array of native decimal prices per night.
-- **Parameters**: `from` | `to` (string bounds).
-- **Why**: Exists specifically to let frontend clients rapidly assemble an itemized price receipt natively for the end user.
-
-#### `GET /api/price/total/{from}/{to}`
-Aggregates pricing over a date bounds securely.
-- **Why**: Evaluates discounts factorizing extended stays. Encapsulates parsing of specific date-overrides (e.g. Holidays) intermixed with weekday algorithms into a single trustworthy receipt node.
-- **Parameters**: `from` & `to` (string YYYY-MM-DD).
-- **Returns**: `200 OK` with JSON object structure: `{ Nights: int, FullPrice: decimal, DiscountedPrice: decimal }`.
-- **Potential Exceptions**: Throws underlying `ArgumentException` triggering HTTP 400 if strictly formatted dates fail to parse.
-
----
-
 ## Technical Design Decisions
 
 ### Single Source Of Truth (SSOT)
 By utilizing Google Calendar's metadata features (`ExtendedProperties.Private__`) driven via OAuth2 (`GCP_SERVICE_ACCOUNT_KEY`), the application offloads scheduling complexity, concurrency logic, and schema management entirely to Google. Booking data remains abstracted out of the public description. 
 
-### Modular Pricing Hierarchy
-The `PriceCalculator` evaluates overlapping matrices uniformly via a resilient fallback waterfall mechanism:
-1. **Specific Dates**: Targets explicitly mapped dictionary dates in `YYYY-MM-DD` for strict overrides (Holidays/High-Season).
-2. **Weekly Day Cycles**: Checks Dictionary for Day-of-Week overrides (Weekend surge matrices).
-3. **Default Baseline**: Final fallback to a flat rate.
-4. **Multiplier Discounts**: Mutates final aggregate totals checking strictly bounded global parameters: `discount_week` (>= 7 days) and `discount_month` (>= 28 days).
+### Authoritative pricing boundary
+`POST /api/Payment` derives the reservation dates from the server-owned Google Calendar event and calls the JavaScript pricing API over HTTPS. A pricing failure returns `503` and prevents Stripe Checkout creation; browser totals are never accepted as authoritative.
