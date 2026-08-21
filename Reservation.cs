@@ -6,7 +6,6 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
-using System.ClientModel.Primitives;
 using Ical.Net;
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Calendar.v3;
@@ -716,13 +715,6 @@ public class Reservation
             _logger.LogError(ex, "Error processing webhook");
             return new ObjectResult("Error processing webhook") { StatusCode = 500 };
         }
-    }
-
-    private PriceCalculator GetCalculator()
-    {
-        string rulesPath = Path.Combine(AppContext.BaseDirectory, "price_rules.json");
-        var rules = PriceRules.CreateFromJson(rulesPath);
-        return new PriceCalculator(rules);
     }
 
     private IEnumerable<string> GetCalendarUrls()
